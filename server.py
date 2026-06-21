@@ -88,6 +88,46 @@ async def health():
     return {"status": "ok", "transport": TRANSPORT}
 
 
+@app.get("/elevenlabs/voices")
+async def elevenlabs_voices():
+    """List the account's ElevenLabs voices so the web UI can offer a picker.
+
+    Returns {voices: [{id, name, accent, category}]}. Empty list (not an error) if
+    no key is set, so the picker just shows nothing rather than breaking. Premade
+    voices work on the free tier; library voices need a paid ElevenLabs plan.
+    """
+    import aiohttp
+
+    key = os.environ.get("ELEVENLABS_API_KEY")
+    if not key:
+        return {"voices": []}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": key}
+            ) as resp:
+                if resp.status >= 400:
+                    logger.warning(f"ElevenLabs /voices error {resp.status}")
+                    return {"voices": []}
+                data = await resp.json()
+    except Exception as e:
+        logger.warning(f"Failed to list ElevenLabs voices: {e}")
+        return {"voices": []}
+
+    voices = [
+        {
+            "id": v["voice_id"],
+            "name": v.get("name", ""),
+            "accent": (v.get("labels") or {}).get("accent", ""),
+            "category": v.get("category", ""),
+        }
+        for v in data.get("voices", [])
+    ]
+    # Sort free-usable premade voices first so the default is playable.
+    voices.sort(key=lambda v: (v["category"] != "premade", v["name"].lower()))
+    return {"voices": voices}
+
+
 @app.post("/api/offer")
 async def offer(
     request: dict,
@@ -96,9 +136,11 @@ async def offer(
     user_email: str = "",
     pathname: str = "",
     portfolio: str = "",
+    voice: str = "",
 ):
-    # The browser appends ?user_name=...&pathname=... so the bot can personalize the
-    # first greeting. Spawn the pipeline only for a brand-new connection.
+    # The browser appends ?user_name=...&pathname=...&voice=... so the bot can
+    # personalize the greeting and pick the chosen ElevenLabs voice. Spawn the
+    # pipeline only for a brand-new connection.
     async def on_new_connection(connection):
         transport = SmallWebRTCTransport(
             webrtc_connection=connection,
@@ -111,6 +153,7 @@ async def offer(
             user_email=user_email or None,
             pathname=pathname or None,
             portfolio=portfolio or None,
+            voice=voice or None,
         )
 
     return await webrtc.handle_web_request(
@@ -134,6 +177,7 @@ async def connect(
     user_email: str = "",
     pathname: str = "",
     portfolio: str = "",
+    voice: str = "",
 ):
     """Daily transport: create a room + tokens, spawn the bot, return client creds.
 
@@ -176,6 +220,7 @@ async def connect(
         user_email=user_email or None,
         pathname=pathname or None,
         portfolio=portfolio or None,
+        voice=voice or None,
     )
     return {"room_url": room.url, "token": client_token}
 

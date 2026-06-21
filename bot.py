@@ -302,12 +302,66 @@ TOOL_TIMEOUT_SECS = float(os.getenv("TOOL_TIMEOUT_SECS", "20"))
 MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "320"))
 
 
+def _cartesia_tts():
+    return CartesiaTTSService(
+        api_key=os.environ["CARTESIA_API_KEY"],
+        voice_id=os.environ["CARTESIA_VOICE_ID"],
+    )
+
+
+def _elevenlabs_tts(voice_override: str | None = None):
+    """ElevenLabs streaming TTS. The voice id comes from the web UI's voice menu
+    (voice_override, via the ?voice= query param) or falls back to ELEVENLABS_VOICE_ID.
+    Expressivity (style/stability/speaker-boost) is env-tunable; flash v2.5 is the
+    lowest-latency model. Lazy import so the elevenlabs extra stays optional."""
+    key = os.environ.get("ELEVENLABS_API_KEY")
+    voice = voice_override or os.environ.get("ELEVENLABS_VOICE_ID")
+    if not key or not voice:
+        raise RuntimeError(
+            "ELEVENLABS_API_KEY and a voice (UI selection or ELEVENLABS_VOICE_ID) "
+            "must both be set for ElevenLabs TTS."
+        )
+    from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+
+    el_style = os.getenv("ELEVENLABS_STYLE", "0.45").strip()
+    el_stability = os.getenv("ELEVENLABS_STABILITY", "0.35").strip()
+    el_boost = os.getenv("ELEVENLABS_SPEAKER_BOOST", "true").strip()
+    expressivity: dict = {}
+    if el_style:
+        expressivity["style"] = float(el_style)
+    if el_stability:
+        expressivity["stability"] = float(el_stability)
+    if el_boost:
+        expressivity["use_speaker_boost"] = el_boost.lower() in ("1", "true", "yes", "on")
+
+    kwargs: dict = dict(
+        api_key=key,
+        voice_id=voice,
+        model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
+    )
+    if expressivity:
+        kwargs["settings"] = ElevenLabsTTSService.Settings(**expressivity)
+    return ElevenLabsTTSService(**kwargs)
+
+
+def _build_tts(voice: str | None):
+    """TTS service, provider-switchable via TTS_PROVIDER (default elevenlabs). The
+    per-session `voice` (from the UI menu) only applies to ElevenLabs."""
+    provider = os.getenv("TTS_PROVIDER", "elevenlabs").lower()
+    if provider == "cartesia":
+        logger.info("TTS provider: cartesia")
+        return _cartesia_tts()
+    logger.info(f"TTS provider: elevenlabs (voice={voice or os.getenv('ELEVENLABS_VOICE_ID')!r})")
+    return _elevenlabs_tts(voice)
+
+
 async def run_bot(
     transport,
     user_name: str | None = None,
     user_email: str | None = None,
     pathname: str | None = None,
     portfolio: str | None = None,
+    voice: str | None = None,
 ):
     """Build and run the voice pipeline over the given Pipecat transport.
 
@@ -338,10 +392,7 @@ async def run_bot(
         ),
     )
 
-    tts = CartesiaTTSService(
-        api_key=os.environ["CARTESIA_API_KEY"],
-        voice_id=os.environ["CARTESIA_VOICE_ID"],
-    )
+    tts = _build_tts(voice)
 
     llm = _build_llm(MAX_TOKENS)
 

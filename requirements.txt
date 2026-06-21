@@ -1,4 +1,4 @@
-pipecat-ai[deepgram,cartesia,groq,openai,silero,webrtc]==1.2.1
+pipecat-ai[deepgram,cartesia,groq,openai,elevenlabs,silero,webrtc]==1.2.1
 aiortc
 fastapi
 uvicorn[standard]
