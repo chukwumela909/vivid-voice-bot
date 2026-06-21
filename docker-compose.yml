@@ -1,0 +1,59 @@
+# Optional Docker Compose for the WorldStreet Vivid voice bot on Coolify.
+#
+# You usually DON'T need this — deploying the bot as a Coolify "Dockerfile"
+# application (Base Directory /) is simpler. Use this compose only if you want
+# SmallWebRTC + a self-hosted coturn TURN relay in one stack. With TRANSPORT=daily
+# (recommended) you need neither coturn nor ICE config.
+#
+# In Coolify: add a "Docker Compose" resource, set the compose path to
+# docker-compose.yml, set the env vars below in the Environment tab, and give the
+# `bot` service a domain so Traefik terminates HTTPS to port 7860.
+
+services:
+  bot:
+    build:
+      context: .
+    environment:
+      # Provider keys (set these in Coolify, not here):
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY}
+      CARTESIA_VOICE_ID: ${CARTESIA_VOICE_ID}
+      DEEPGRAM_MODEL: ${DEEPGRAM_MODEL:-nova-3}
+      # LLM — switchable. LLM_PROVIDER=groq (default) or openai.
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      BOT_PORT: "7860"
+      # Media transport: "daily" (recommended for cloud — no TURN needed) or
+      # "smallwebrtc". Daily needs DAILY_API_KEY.
+      TRANSPORT: ${TRANSPORT:-daily}
+      DAILY_API_KEY: ${DAILY_API_KEY}
+      # Only used by smallwebrtc. JSON array of STUN/TURN servers. STUN alone is
+      # unreliable behind Docker NAT — add the coturn TURN entry below for prod.
+      WEBRTC_ICE_SERVERS: ${WEBRTC_ICE_SERVERS:-["stun:stun.l.google.com:19302"]}
+      # CORS: lock to your web origin in production, e.g. https://app.yourdomain.com
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+    expose:
+      - "7860"          # Coolify/Traefik proxies HTTPS -> 7860 (signaling)
+    restart: unless-stopped
+
+  # --- Optional: self-hosted TURN relay (only for TRANSPORT=smallwebrtc) --------
+  # Uncomment to run coturn. TURN needs its ports directly reachable, so host
+  # networking is simplest. Open UDP 3478 and the relay range (49160-49200) in your
+  # server firewall, then point WEBRTC_ICE_SERVERS at it (see DEPLOY.md).
+  #
+  # coturn:
+  #   image: coturn/coturn:latest
+  #   network_mode: host
+  #   restart: unless-stopped
+  #   command: >
+  #     -n
+  #     --listening-port=3478
+  #     --min-port=49160 --max-port=49200
+  #     --realm=turn.yourdomain.com
+  #     --external-ip=YOUR_SERVER_PUBLIC_IP
+  #     --user=${TURN_USER}:${TURN_PASSWORD}
+  #     --lt-cred-mech
+  #     --no-tls --no-dtls
