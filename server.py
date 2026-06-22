@@ -83,6 +83,12 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+async def root():
+    # Some platform health checks probe "/"; answer 200 so the container is healthy.
+    return {"service": "vivid-voice-bot", "status": "ok", "transport": TRANSPORT}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "transport": TRANSPORT}
@@ -226,5 +232,8 @@ async def connect(
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("BOT_PORT", "7860"))
+    # Honor a platform-injected $PORT first (Coolify/Heroku-style), then BOT_PORT,
+    # then 7860. Binding the port the proxy expects is what avoids 502s.
+    port = int(os.getenv("PORT") or os.getenv("BOT_PORT") or "7860")
+    logger.info(f"Starting uvicorn on 0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
