@@ -323,9 +323,15 @@ def _elevenlabs_tts(voice_override: str | None = None):
         )
     from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 
-    el_style = os.getenv("ELEVENLABS_STYLE", "0.45").strip()
-    el_stability = os.getenv("ELEVENLABS_STABILITY", "0.35").strip()
-    el_boost = os.getenv("ELEVENLABS_SPEAKER_BOOST", "true").strip()
+    # Expressivity (style/stability/speaker_boost) is OFF by default. ElevenLabs'
+    # streaming WS only accepts voice_settings in the first message and forbids them
+    # changing afterward; Pipecat re-sends them on continuation/reconnect, which
+    # triggers a 1008 "voice_settings must not change" policy violation and choppy
+    # audio. Leaving these empty sends no voice_settings (uses the voice's defaults)
+    # — stable. Set the envs to opt back in only if your model/voice tolerates it.
+    el_style = os.getenv("ELEVENLABS_STYLE", "").strip()
+    el_stability = os.getenv("ELEVENLABS_STABILITY", "").strip()
+    el_boost = os.getenv("ELEVENLABS_SPEAKER_BOOST", "").strip()
     expressivity: dict = {}
     if el_style:
         expressivity["style"] = float(el_style)
