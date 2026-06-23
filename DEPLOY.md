@@ -53,7 +53,7 @@ Copy from `.env.example`. Minimum for Daily:
 | `CARTESIA_VOICE_ID` | a Cartesia voice id |
 | `GROQ_API_KEY` | your Groq key (default LLM) |
 | `GROQ_MODEL` | `openai/gpt-oss-20b` (or a larger model) |
-| `LLM_PROVIDER` | `groq` (or `openai` + `OPENAI_API_KEY`/`OPENAI_MODEL`) |
+| `LLM_PROVIDER` | `groq` (or `openai` + `OPENAI_API_KEY`/`OPENAI_MODEL`, or `openrouter` + `OPEN_ROUTER_KEY`/`OPENROUTER_MODEL`) |
 | `TRANSPORT` | `daily` |
 | `DAILY_API_KEY` | your Daily key |
 | `ALLOWED_ORIGINS` | `https://<your-web-domain>` (lock CORS; `*` to start) |

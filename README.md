@@ -41,9 +41,13 @@ and click the Vivid orb.
 ## Switching the LLM
 
 ```
-LLM_PROVIDER=groq    GROQ_MODEL=openai/gpt-oss-20b     # default
-LLM_PROVIDER=openai  OPENAI_MODEL=gpt-4o               # stronger tool-calling
+LLM_PROVIDER=groq        GROQ_MODEL=openai/gpt-oss-20b   # default
+LLM_PROVIDER=openai      OPENAI_MODEL=gpt-4o             # stronger tool-calling
+LLM_PROVIDER=openrouter  OPENROUTER_MODEL=x-ai/grok-4.20 # reuses OPEN_ROUTER_KEY
 ```
+
+OpenRouter reuses the `OPEN_ROUTER_KEY` already set for the vision `look` tool, and
+any model you pick must support tool calling.
 
 ## Deployment
 

@@ -12,9 +12,11 @@ LLM provider is switchable via env (LLM_PROVIDER): "groq" (default) or "openai".
 
 import asyncio
 import os
+import random
 import uuid
 from pathlib import Path
 
+import aiohttp
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -22,7 +24,7 @@ from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import LLMRunFrame, TTSSpeakFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -90,12 +92,24 @@ BASE_PERSONA = f"""You are Vivid — the voice AI built into WorldStreet's ecosy
 - When the user asks to go to a page, just call navigateToPage and respond with something ultra-minimal like "ok", "done", "sure", or "got it". NEVER say "Navigating to..." or "Taking you to...".
 - After arriving on a page, do NOT announce it unless the user asks.
 
+## Vision — You Can Actually See
+- You can see through the user's camera (the physical world around them) and their screen, using the look tool. This is real sight — never guess or make something up when you can just look.
+- Call look whenever seeing would help, proactively:
+  - They ask you to look at, read, identify, check, or describe something.
+  - They mention their screen ("can you see my screen", "look at this", "what's this error", "what's on my screen").
+  - They talk about something physical as if you can see it — what they're holding, wearing, pointing at, or what's in front of them.
+  - When in doubt and the thing is visual, glance first with look, THEN answer — don't ask "what do you mean" if you could just look.
+- Set source to "screen" for anything on their display/screen, and "camera" for the physical world. Default to "camera".
+- Put what you're looking for in the question, e.g. "what's written on this label" or "what error is showing on screen".
+- After looking, just say what you saw naturally, in your own voice. NEVER mention cameras, frames, screenshots, tools, or "the image" — speak as if you simply looked.
+- If look reports no image is available, briefly tell them to turn on the camera or tap "Share screen" on the orb, then carry on.
+
 ## Safety
 - Never ask for passwords, card numbers, or sensitive credentials through voice.
 - Protect user privacy at all times.
 
 ## Functions — you have real tools; never pretend
-- You can navigate the dashboard, look up crypto prices, check the user's balance/portfolio, analyze markets, pull transaction history, look up forex rates, and show alerts.
+- You can navigate the dashboard, look up crypto prices, check the user's balance/portfolio, analyze markets, pull transaction history, look up forex rates, show alerts, and SEE through their camera or screen (look).
 - When a user asks for something a tool covers, CALL IT. Don't describe what you could do — do it.
 - Only calling a tool does anything; describing one does nothing the user can see.
 - After getting data from a tool, summarize it conversationally — don't read raw numbers like a robot.
@@ -108,7 +122,8 @@ BASE_PERSONA = f"""You are Vivid — the voice AI built into WorldStreet's ecosy
 - Market conditions/analysis -> getMarketAnalysis.
 - Their trades/transactions -> getTransactionHistory.
 - A currency/forex rate -> getForexRate.
-- Show an alert -> showAlert."""
+- Show an alert -> showAlert.
+- Look at / read / see something, or "see my screen" -> look (source="screen" for the screen, "camera" for the physical world)."""
 
 
 # =============================================================================
@@ -225,6 +240,38 @@ GET_FOREX_RATE_TOOL = FunctionSchema(
     required=[],
 )
 
+LOOK_TOOL = FunctionSchema(
+    name="look",
+    description=(
+        "See through the user's camera or screen and answer a question about what's "
+        "visible RIGHT NOW. Call this whenever actually seeing matters: the user asks "
+        "you to look at / read / identify / describe something, mentions their screen "
+        "('can you see my screen', 'look at this', 'what's this error'), or talks about "
+        "something physical in front of them (what they're holding/showing/pointing at). "
+        "Returns a short description of what's currently in view (or a status saying no "
+        "image was available)."
+    ),
+    properties={
+        "question": {
+            "type": "string",
+            "description": (
+                "What to look at or look for, e.g. 'what is written on this label', "
+                "'what am I holding up', or 'what error is on the screen'."
+            ),
+        },
+        "source": {
+            "type": "string",
+            "enum": ["camera", "screen"],
+            "description": (
+                "Where to look: 'screen' for anything on the user's display/screen, "
+                "'camera' for the physical world around them. Defaults to 'camera'."
+            ),
+        },
+    },
+    required=["question"],
+)
+
+# Tools whose calls are bridged to the browser's JS handlers (lib/vivid-functions.ts).
 ALL_TOOLS = [
     NAVIGATE_TOOL,
     SHOW_ALERT_TOOL,
@@ -234,6 +281,12 @@ ALL_TOOLS = [
     GET_TRANSACTIONS_TOOL,
     GET_FOREX_RATE_TOOL,
 ]
+
+# The look tool is NOT a generic JS-bridge tool — it has a dedicated capture path
+# (capture_frame -> frame_response) and runs vision server-side. Kept separate so it
+# isn't registered with _make_bridge, but still advertised to the LLM.
+VISION_TOOLS = [LOOK_TOOL]
+ALL_TOOL_SCHEMAS = ALL_TOOLS + VISION_TOOLS
 
 
 # =============================================================================
@@ -245,10 +298,28 @@ def _build_llm(max_tokens: int):
 
     LLM_PROVIDER=groq (default): GroqLLMService, model from GROQ_MODEL.
     LLM_PROVIDER=openai: OpenAILLMService, model from OPENAI_MODEL.
+    LLM_PROVIDER=openrouter: OpenAILLMService pointed at OpenRouter (OpenAI-compatible),
+        model from OPENROUTER_MODEL, key from OPEN_ROUTER_KEY (shared with vision).
     Temperature is kept low (LLM_TEMPERATURE, default 0.4) for reliable tool calling.
     """
     provider = os.getenv("LLM_PROVIDER", "groq").lower()
     temperature = float(os.getenv("LLM_TEMPERATURE", "0.4"))
+
+    if provider == "openrouter":
+        # OpenRouter speaks the OpenAI API, so reuse OpenAILLMService with its base_url.
+        # Reuses OPEN_ROUTER_KEY (already set for the vision `look` tool).
+        from pipecat.services.openai.llm import OpenAILLMService
+
+        model = os.getenv("OPENROUTER_MODEL", "x-ai/grok-4.20")
+        logger.info(f"LLM provider: openrouter (model={model})")
+        return OpenAILLMService(
+            api_key=os.environ["OPEN_ROUTER_KEY"],
+            base_url="https://openrouter.ai/api/v1",
+            model=model,
+            params=OpenAILLMService.InputParams(
+                temperature=temperature, max_completion_tokens=max_tokens
+            ),
+        )
 
     if provider == "openai":
         from pipecat.services.openai.llm import OpenAILLMService
@@ -292,6 +363,89 @@ def _build_system_prompt(
     if portfolio:
         prompt += f"\n\n## Portfolio Context\n{portfolio}"
     return prompt
+
+
+# =============================================================================
+# Vision — the `look` tool's server side. Frames are captured in the browser and
+# sent over the RTVI data channel; here we describe them with a vision model.
+# Kept on OpenRouter (default Gemini 2.5 Flash) so image tokens don't hit the
+# conversational LLM's budget.
+# =============================================================================
+
+VISION_MODEL = os.getenv("VISION_MODEL", "google/gemini-2.5-flash")
+VISION_MAX_TOKENS = int(os.getenv("VISION_MAX_TOKENS", "220"))
+VISION_TIMEOUT_SECS = float(os.getenv("VISION_TIMEOUT_SECS", "25"))
+# How long the bot waits for the browser to return the captured frames.
+FRAME_TIMEOUT_SECS = float(os.getenv("FRAME_TIMEOUT_SECS", "15"))
+# Number of consecutive frames to capture per glance (a short burst the vision
+# model reads together — like a person glancing — instead of one stale snapshot).
+VISION_FRAME_COUNT = int(os.getenv("VISION_FRAME_COUNT", "5"))
+
+# Spoken while a look is in flight so the ~1-2s capture+vision round-trip isn't dead air.
+LOOKING_FILLERS = [
+    "Let me take a look.",
+    "One sec, looking now.",
+    "Okay, taking a look.",
+    "Let me see.",
+    "Hang on, checking that.",
+]
+
+
+async def _describe_image(images: list[str], question: str, source: str) -> str:
+    """Describe a short burst of camera/screen frames via the OpenRouter vision model.
+
+    `images` are consecutive frames (a fraction of a second apart) of one glance, so
+    the model can read motion/context together rather than a single, possibly-stale
+    snapshot. Returns a short, spoken-style description.
+    """
+    key = os.environ.get("OPEN_ROUTER_KEY")
+    if not key:
+        raise RuntimeError("OPEN_ROUTER_KEY is not set; required for the look tool.")
+
+    def _as_url(b64: str) -> str:
+        return b64 if b64.startswith("data:") else f"data:image/jpeg;base64,{b64}"
+
+    where = "the user's screen" if source == "screen" else "the user's camera"
+    content: list[dict] = [{"type": "text", "text": question or "What do you see?"}]
+    for img in images:
+        content.append({"type": "image_url", "image_url": {"url": _as_url(img)}})
+
+    payload = {
+        "model": VISION_MODEL,
+        "max_tokens": VISION_MAX_TOKENS,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"You are the eyes of a friendly voice assistant, looking through {where}. "
+                    "The images are consecutive frames of ONE quick glance (a fraction of a "
+                    "second apart) — read them together as a single live view to understand "
+                    "what's there and any motion or change, the way a person glancing would. "
+                    "Answer the question in at most two short, spoken-style sentences. Describe "
+                    "only what is actually visible and relevant; if you can't tell, say so "
+                    "briefly. No markdown, no lists."
+                ),
+            },
+            {"role": "user", "content": content},
+        ],
+    }
+
+    timeout = aiohttp.ClientTimeout(total=VISION_TIMEOUT_SECS)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json=payload,
+        ) as resp:
+            data = await resp.json()
+            if resp.status >= 400:
+                msg = (
+                    data.get("error", {}).get("message")
+                    if isinstance(data, dict)
+                    else None
+                )
+                raise RuntimeError(msg or f"vision request failed ({resp.status})")
+            return data["choices"][0]["message"]["content"].strip()
 
 
 # =============================================================================
@@ -414,7 +568,7 @@ async def run_bot(
         {"role": "system", "content": _build_system_prompt(**ctx_state)},
     ]
     context = LLMContext(
-        messages, tools=ToolsSchema(standard_tools=ALL_TOOLS)
+        messages, tools=ToolsSchema(standard_tools=ALL_TOOL_SCHEMAS)
     )
 
     # Auto-summarize once the context crosses a token/message threshold so a long
@@ -478,6 +632,65 @@ async def run_bot(
     for tool in ALL_TOOLS:
         llm.register_function(tool.name, _make_bridge(tool.name))
 
+    # --- Vision (look) tool --------------------------------------------------
+    # Dedicated path: ask the browser to capture a short burst of fresh frames from
+    # the camera or screen, await them over the data channel, then describe them with
+    # the vision model. Not part of the generic JS bridge above.
+    pending_frames: dict[str, asyncio.Future] = {}
+
+    async def look(params):
+        request_id = str(uuid.uuid4())
+        future = asyncio.get_running_loop().create_future()
+        pending_frames[request_id] = future
+        question = params.arguments.get("question", "")
+        source = params.arguments.get("source", "camera")
+        if source not in ("camera", "screen"):
+            source = "camera"
+        logger.info(
+            f"look -> browser (id={request_id}, source={source}, q={question!r})"
+        )
+        # Brief filler so the capture + vision round-trip isn't dead air.
+        await params.llm.push_frame(TTSSpeakFrame(random.choice(LOOKING_FILLERS)))
+        await rtvi.send_server_message(
+            {
+                "type": "capture_frame",
+                "id": request_id,
+                "source": source,
+                "count": VISION_FRAME_COUNT,
+            }
+        )
+        try:
+            images = await asyncio.wait_for(future, timeout=FRAME_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            await params.result_callback(
+                {"status": "no_image", "message": f"The {source} didn't respond in time."}
+            )
+            return
+        except asyncio.CancelledError:
+            return
+        finally:
+            pending_frames.pop(request_id, None)
+
+        if not images:
+            hint = (
+                "The user hasn't shared their screen yet — ask them to tap Share screen on the Vivid orb."
+                if source == "screen"
+                else "The camera isn't on — ask them to turn on the camera on the Vivid orb."
+            )
+            await params.result_callback({"status": "no_image", "message": hint})
+            return
+
+        try:
+            observation = await _describe_image(images, question, source)
+            await params.result_callback({"status": "ok", "observation": observation})
+        except Exception as e:
+            logger.exception("look: vision request failed")
+            await params.result_callback(
+                {"status": "error", "message": f"Couldn't make sense of the view: {e}"}
+            )
+
+    llm.register_function("look", look)
+
     @llm.event_handler("on_function_calls_cancelled")
     async def on_calls_cancelled(_llm, calls):
         # User interrupted while a tool was in flight — drop the parked Futures so
@@ -485,6 +698,10 @@ async def run_bot(
         logger.info(f"tool calls cancelled: {[c.function_name for c in calls]}")
         for rid in list(pending_tools):
             fut = pending_tools.pop(rid, None)
+            if fut and not fut.done():
+                fut.cancel()
+        for rid in list(pending_frames):
+            fut = pending_frames.pop(rid, None)
             if fut and not fut.done():
                 fut.cancel()
 
@@ -496,6 +713,11 @@ async def run_bot(
             future = pending_tools.get(data.get("id"))
             if future and not future.done():
                 future.set_result(data.get("result"))
+        elif message.type == "frame_response":
+            # Browser returned captured frames for a look: {id, images: [...]}.
+            future = pending_frames.get(data.get("id"))
+            if future and not future.done():
+                future.set_result(data.get("images") or [])
         elif message.type == "app_context":
             # Live context update (e.g. the user navigated). Rebuild the system
             # message so the next turn sees the fresh page / portfolio.
@@ -507,7 +729,7 @@ async def run_bot(
 
     logger.info(
         f"WorldStreet Vivid pipeline starting — provider={os.getenv('LLM_PROVIDER', 'groq')}, "
-        f"tools={[t.name for t in ALL_TOOLS]}"
+        f"tools={[t.name for t in ALL_TOOL_SCHEMAS]}"
     )
 
     pipeline = Pipeline(

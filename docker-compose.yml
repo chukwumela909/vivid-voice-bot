@@ -19,12 +19,15 @@ services:
       CARTESIA_API_KEY: ${CARTESIA_API_KEY}
       CARTESIA_VOICE_ID: ${CARTESIA_VOICE_ID}
       DEEPGRAM_MODEL: ${DEEPGRAM_MODEL:-nova-3}
-      # LLM — switchable. LLM_PROVIDER=groq (default) or openai.
+      # LLM — switchable. LLM_PROVIDER=groq (default), openai, or openrouter.
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY}
       GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      # OpenRouter LLM (LLM_PROVIDER=openrouter). Reuses OPEN_ROUTER_KEY (also used by vision).
+      OPEN_ROUTER_KEY: ${OPEN_ROUTER_KEY}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-x-ai/grok-4.20}
       BOT_PORT: "7860"
       # Media transport: "daily" (recommended for cloud — no TURN needed) or
       # "smallwebrtc". Daily needs DAILY_API_KEY.
